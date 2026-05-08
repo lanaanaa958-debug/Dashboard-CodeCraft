@@ -1,0 +1,213 @@
+import React, { useState, useEffect, useMemo } from 'react';
+import { initializeApp } from 'firebase/app';
+import { getFirestore, collection, onSnapshot, doc, updateDoc } from 'firebase/firestore';
+import { getAuth, signInAnonymously, onAuthStateChanged } from 'firebase/auth';
+import { 
+  LayoutDashboard, Lightbulb, CheckCircle2, XCircle, Archive, Search, Filter, 
+  Clock, Menu, X, PieChart, ShieldAlert, RefreshCw, Sparkles, Zap, 
+  BarChart3, BrainCircuit, MessageSquareQuote, AlertTriangle 
+} from 'lucide-react';
+import { motion, AnimatePresence } from 'framer-motion';
+
+const firebaseConfig = JSON.parse(__firebase_config);
+const app = initializeApp(firebaseConfig);
+const auth = getAuth(app);
+const db = getFirestore(app);
+const appId = typeof __app_id !== 'undefined' ? __app_id : 'codecraft-admin';
+
+const STATUS = { PENDING: 'pending', APPROVED: 'approved', REJECTED: 'rejected', ARCHIVED: 'archived' };
+const CATS = ['All', 'Web', 'Mobile', 'AI/ML', 'IoT', 'Game Dev', 'Cybersecurity'];
+
+export default function App() {
+  const [user, setUser] = useState(null);
+  const [submissions, setSubmissions] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [selectedCategory, setSelectedCategory] = useState('All');
+  const [selectedIdea, setSelectedIdea] = useState(null);
+  const [activeTab, setActiveTab] = useState('dashboard');
+  const [search, setSearch] = useState('');
+  const [isSidebarOpen, setIsSidebarOpen] = useState(true);
+  const [ai, setAi] = useState({ analyzing: false, insights: null, summary: null, loadingSummary: false });
+
+  useEffect(() => {
+    const init = async () => {
+      try { await signInAnonymously(auth); } catch (e) { console.error(e); }
+    };
+    init();
+    return onAuthStateChanged(auth, setUser);
+  }, []);
+
+  useEffect(() => {
+    if (!user) return;
+    setLoading(true);
+    const q = collection(db, 'artifacts', appId, 'public', 'data', 'ide_submissions');
+    return onSnapshot(q, (s) => {
+      setSubmissions(s.docs.map(d => ({ id: d.id, ...d.data() })).sort((a, b) => (b.timestamp?.seconds || 0) - (a.timestamp?.seconds || 0)));
+      setLoading(false);
+    });
+  }, [user]);
+
+  const callGemini = async (prompt, system, isJson = false) => {
+    const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-3-flash-preview:generateContent?key=`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        contents: [{ parts: [{ text: prompt }] }],
+        systemInstruction: { parts: [{ text: system }] },
+        generationConfig: isJson ? { responseMimeType: "application/json" } : {}
+      })
+    });
+    const data = await res.json();
+    return data.candidates[0].content.parts[0].text;
+  };
+
+  const analyzeIdea = async (idea) => {
+    setAi(p => ({ ...p, analyzing: true, insights: null }));
+    const system = "Analyze project: provide JSON {summary: string, feasibility: 1-10, challenges: string[], recommendation: string}";
+    const prompt = `Title: ${idea.judul_ide}\nCategory: ${idea.kategori}\nDesc: ${idea.deskripsi}`;
+    const result = await callGemini(prompt, system, true);
+    setAi(p => ({ ...p, insights: JSON.parse(result), analyzing: false }));
+  };
+
+  const generateSummary = async () => {
+    setAi(p => ({ ...p, loadingSummary: true }));
+    const list = submissions.slice(0, 10).map(s => `- ${s.judul_ide}`).join('\n');
+    const result = await callGemini(`Summarize trends in 2 sentences:\n${list}`, "You are a CTO.");
+    setAi(p => ({ ...p, summary: result, loadingSummary: false }));
+  };
+
+  const filtered = useMemo(() => submissions.filter(s => 
+    (selectedCategory === 'All' || s.kategori === selectedCategory) &&
+    (s.judul_ide?.toLowerCase().includes(search.toLowerCase())) &&
+    (activeTab === 'archive' ? s.status === STATUS.ARCHIVED : s.status !== STATUS.ARCHIVED)
+  ), [submissions, search, selectedCategory, activeTab]);
+
+  const updateStatus = async (id, status) => {
+    await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'ide_submissions', id), { status });
+    if (selectedIdea?.id === id) setSelectedIdea(null);
+  };
+
+  const Card = ({ title, val, icon: Icon, color }) => (
+    <div className="bg-slate-900 border border-slate-800 p-5 rounded-2xl flex items-center gap-4">
+      <div className={`p-3 rounded-xl ${color}`}><Icon size={20} /></div>
+      <div><p className="text-slate-400 text-xs font-medium">{title}</p><h3 className="text-xl font-bold text-white">{val}</h3></div>
+    </div>
+  );
+
+  return (
+    <div className="min-h-screen bg-slate-950 text-slate-200 flex overflow-hidden font-sans">
+      {/* Sidebar */}
+      <aside className={`bg-slate-900 border-r border-slate-800 transition-all ${isSidebarOpen ? 'w-64' : 'w-20'}`}>
+        <div className="p-6 flex items-center gap-3"><Sparkles className="text-indigo-500" />{isSidebarOpen && <span className="font-bold">CodeCraft</span>}</div>
+        <nav className="px-4 space-y-1">
+          {[{id:'dashboard', i:PieChart, l:'Home'}, {id:'submissions', i:Lightbulb, l:'Ideas'}, {id:'archive', i:Archive, l:'Archived'}].map(t => (
+            <button key={t.id} onClick={() => setActiveTab(t.id)} className={`w-full flex items-center gap-4 p-3 rounded-xl transition-all ${activeTab === t.id ? 'bg-indigo-600/10 text-indigo-400' : 'text-slate-500 hover:bg-slate-800'}`}>
+              <t.i size={18} />{isSidebarOpen && <span>{t.l}</span>}
+            </button>
+          ))}
+        </nav>
+      </aside>
+
+      <main className="flex-1 flex flex-col h-screen">
+        {/* Header */}
+        <header className="h-16 border-b border-slate-800 flex items-center justify-between px-8 bg-slate-900/50">
+          <button onClick={() => setIsSidebarOpen(!isSidebarOpen)}><Menu size={20}/></button>
+          <div className="flex items-center gap-4">
+            <div className="relative"><Search className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-500" size={14}/><input value={search} onChange={e=>setSearch(e.target.value)} className="bg-slate-800 rounded-full pl-9 pr-4 py-1.5 text-sm outline-none w-48 focus:w-64 transition-all" placeholder="Search..."/></div>
+            <div className="w-8 h-8 rounded-full bg-indigo-600 flex items-center justify-center text-xs font-bold">AD</div>
+          </div>
+        </header>
+
+        <div className="flex-1 overflow-y-auto p-8 custom-scrollbar">
+          <div className="max-w-6xl mx-auto space-y-6">
+            {activeTab === 'dashboard' && (
+              <>
+                <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
+                  <Card title="Total" val={submissions.length} icon={Lightbulb} color="bg-blue-500/10 text-blue-500" />
+                  <Card title="Pending" val={submissions.filter(s=>s.status===STATUS.PENDING).length} icon={Clock} color="bg-yellow-500/10 text-yellow-500" />
+                  <Card title="Approved" val={submissions.filter(s=>s.status===STATUS.APPROVED).length} icon={CheckCircle2} color="bg-emerald-500/10 text-emerald-500" />
+                  <Card title="Rejected" val={submissions.filter(s=>s.status===STATUS.REJECTED).length} icon={XCircle} color="bg-rose-500/10 text-rose-500" />
+                </div>
+                <div className="bg-slate-900 border border-slate-800 p-6 rounded-2xl">
+                  <div className="flex justify-between items-center mb-4"><h2 className="font-bold flex items-center gap-2"><Zap size={16} className="text-yellow-500"/> AI Dashboard Insight</h2><button onClick={generateSummary} disabled={ai.loadingSummary} className="text-xs bg-indigo-600 px-3 py-1.5 rounded-lg font-bold">{ai.loadingSummary ? 'Thinking...' : 'Analyze Trends'}</button></div>
+                  <div className="p-4 bg-slate-950/50 rounded-xl border border-slate-800 text-sm text-slate-400 italic leading-relaxed">
+                    {ai.summary || "Click analyze to get high-level trends of current project cycle."}
+                  </div>
+                </div>
+              </>
+            )}
+
+            {/* List */}
+            <div className="bg-slate-900 border border-slate-800 rounded-2xl overflow-hidden">
+              <div className="p-4 border-b border-slate-800 flex gap-2 overflow-x-auto no-scrollbar">
+                {CATS.map(c => <button key={c} onClick={()=>setSelectedCategory(c)} className={`px-3 py-1 rounded-full text-[10px] font-bold uppercase ${selectedCategory===c?'bg-indigo-600 text-white':'bg-slate-800 text-slate-500'}`}>{c}</button>)}
+              </div>
+              <table className="w-full text-left">
+                <thead className="bg-slate-800/50 text-slate-500 text-[10px] uppercase font-bold tracking-widest"><tr className="border-b border-slate-800"><th className="p-4">Sender</th><th className="p-4">Idea</th><th className="p-4">Status</th><th className="p-4 text-right">Actions</th></tr></thead>
+                <tbody>
+                  {filtered.map(s => (
+                    <tr key={s.id} onClick={()=>setSelectedIdea(s)} className="border-b border-slate-800/50 hover:bg-slate-800/30 cursor-pointer transition-colors">
+                      <td className="p-4"><div className="font-bold text-sm text-white">{s.nama_pengirim}</div><div className="text-[10px] text-slate-500">{s.kategori}</div></td>
+                      <td className="p-4 max-w-xs truncate text-xs text-slate-300">{s.judul_ide}</td>
+                      <td className="p-4"><span className={`text-[9px] font-bold uppercase px-2 py-0.5 rounded-full ${s.status===STATUS.APPROVED?'text-emerald-500 bg-emerald-500/10':s.status===STATUS.REJECTED?'text-rose-500 bg-rose-500/10':'text-yellow-500 bg-yellow-500/10'}`}>{s.status}</span></td>
+                      <td className="p-4 text-right flex justify-end gap-1" onClick={e=>e.stopPropagation()}>
+                        <button onClick={()=>updateStatus(s.id, STATUS.APPROVED)} className="p-1.5 hover:text-emerald-500"><CheckCircle2 size={16}/></button>
+                        <button onClick={()=>updateStatus(s.id, STATUS.REJECTED)} className="p-1.5 hover:text-rose-500"><XCircle size={16}/></button>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      </main>
+
+      {/* Modal */}
+      <AnimatePresence>
+        {selectedIdea && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+            <motion.div initial={{opacity:0}} animate={{opacity:1}} exit={{opacity:0}} onClick={()=>setSelectedIdea(null)} className="absolute inset-0 bg-slate-950/90 backdrop-blur-sm"/>
+            <motion.div initial={{y:20, opacity:0}} animate={{y:0, opacity:1}} exit={{y:20, opacity:0}} className="relative w-full max-w-4xl bg-slate-900 rounded-3xl overflow-hidden flex flex-col md:flex-row h-[80vh] border border-slate-800">
+              <div className="flex-1 p-8 overflow-y-auto border-r border-slate-800">
+                <span className="text-[10px] font-bold text-indigo-400 uppercase tracking-widest">{selectedIdea.kategori}</span>
+                <h2 className="text-2xl font-bold text-white mt-1 mb-6">{selectedIdea.judul_ide}</h2>
+                <div className="bg-slate-800/50 p-6 rounded-2xl border border-slate-800 text-sm leading-relaxed text-slate-300 whitespace-pre-wrap">{selectedIdea.deskripsi}</div>
+                <div className="flex gap-4 mt-8">
+                  <button onClick={()=>updateStatus(selectedIdea.id, STATUS.APPROVED)} className="flex-1 py-3 bg-emerald-600 rounded-xl font-bold text-sm">Approve</button>
+                  <button onClick={()=>updateStatus(selectedIdea.id, STATUS.REJECTED)} className="flex-1 py-3 bg-rose-600 rounded-xl font-bold text-sm">Reject</button>
+                </div>
+              </div>
+              <div className="w-full md:w-80 bg-slate-950/50 p-8">
+                <h3 className="text-white font-bold flex items-center gap-2 mb-6"><BrainCircuit size={16} className="text-indigo-400"/> AI Analysis</h3>
+                {!ai.insights ? (
+                  <button onClick={()=>analyzeIdea(selectedIdea)} disabled={ai.analyzing} className="w-full py-3 bg-indigo-600/10 text-indigo-400 border border-indigo-500/20 rounded-xl text-xs font-bold">
+                    {ai.analyzing ? 'Processing...' : 'Run Gemini Analysis'}
+                  </button>
+                ) : (
+                  <div className="space-y-6 animate-in fade-in slide-in-from-right-4 duration-500">
+                    <div className="bg-indigo-500/5 p-4 rounded-xl border border-indigo-500/10 text-xs text-indigo-300 italic">"{ai.insights.summary}"</div>
+                    <div className="grid grid-cols-2 gap-3">
+                      <div className="bg-slate-800 p-3 rounded-lg"><p className="text-[8px] text-slate-500 font-bold uppercase mb-1">Feasibility</p><p className="text-lg font-black text-white">{ai.insights.feasibility}/10</p></div>
+                      <div className="bg-slate-800 p-3 rounded-lg"><p className="text-[8px] text-slate-500 font-bold uppercase mb-1">Advice</p><p className="text-[10px] font-bold text-indigo-400">{ai.insights.recommendation}</p></div>
+                    </div>
+                    <div>
+                      <p className="text-[8px] text-slate-500 font-bold uppercase mb-2">Key Challenges</p>
+                      <ul className="space-y-1.5">{ai.insights.challenges.map((c,i)=><li key={i} className="text-[10px] text-slate-400 flex gap-2"><span className="w-1 h-1 bg-indigo-500 rounded-full mt-1.5 shrink-0"/>{c}</li>)}</ul>
+                    </div>
+                  </div>
+                )}
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
+      <style>{`
+        .custom-scrollbar::-webkit-scrollbar { width: 4px; }
+        .custom-scrollbar::-webkit-scrollbar-thumb { background: #334155; border-radius: 10px; }
+        .no-scrollbar::-webkit-scrollbar { display: none; }
+      `}</style>
+    </div>
+  );
+}
